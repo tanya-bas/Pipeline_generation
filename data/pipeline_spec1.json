@@ -1,0 +1,24 @@
+{
+  "name": "Generated Pipeline",
+  "description": "Data pipeline with fixed number of preprocessing steps",
+  "data_path": "./procedual_pipeline/mock_data.csv",
+  "stages": [
+    {
+      "id": "stage_0",
+      "name": "Fill Missing Values",
+      "operation": {
+        "name": "fill_na",
+        "description": "Fill missing values with a specified value",
+        "parameters": {
+          "input_filepath": "./data/input_data.csv",
+          "output_filepath": "./data/stage1_output.csv",
+          "columns": [
+            "column_2"
+          ],
+          "value": "mode",
+          "method": "ffill"
+        }
+      }
+    }
+  ]
+}

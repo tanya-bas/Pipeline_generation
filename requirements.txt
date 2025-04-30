@@ -1,0 +1,6 @@
+inspect-ai
+python-dotenv
+pandas
+numpy
+matplotlib
+openai 

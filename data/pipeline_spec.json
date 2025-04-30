@@ -1,0 +1,100 @@
+{
+  "name": "Generated Pipeline (5 steps)",
+  "description": "Data pipeline with fixed number of preprocessing steps",
+  "data_path": "./data/input_data.csv",
+  "stages": [
+    {
+      "id": "stage_0",
+      "name": "Data Loading",
+      "operation": {
+        "name": "csv_loader",
+        "description": "Load data from a CSV file",
+        "parameters": {
+          "filepath": "./data/input_data.csv"
+        }
+      }
+    },
+    {
+      "id": "stage_1",
+      "name": "Fill Missing Values",
+      "operation": {
+        "name": "fill_na",
+        "description": "Fill missing values with a specified value",
+        "parameters": {
+          "columns": [
+            "column_6"
+          ],
+          "value": "median",
+          "method": "constant"
+        }
+      }
+    },
+    {
+      "id": "stage_2",
+      "name": "Process Step 2",
+      "operation": {
+        "name": "round_values",
+        "description": "Round numeric values to integers",
+        "parameters": {
+          "columns": [
+            "column_8"
+          ]
+        }
+      }
+    },
+    {
+      "id": "stage_3",
+      "name": "Process Step 3",
+      "operation": {
+        "name": "outlier_removal",
+        "description": "Remove outliers based on z-score threshold",
+        "parameters": {
+          "threshold": 3.0,
+          "columns": [
+            "column_2"
+          ]
+        }
+      }
+    },
+    {
+      "id": "stage_4",
+      "name": "Process Step 4",
+      "operation": {
+        "name": "time_features",
+        "description": "Extract date/time components from timestamp column",
+        "parameters": {
+          "features": [
+            "year",
+            "month",
+            "day"
+          ]
+        }
+      }
+    },
+    {
+      "id": "stage_5",
+      "name": "Process Step 5",
+      "operation": {
+        "name": "normalize",
+        "description": "Scale values to 0-1 range",
+        "parameters": {
+          "method": "robust",
+          "columns": [
+            "column_5"
+          ]
+        }
+      }
+    },
+    {
+      "id": "stage_6",
+      "name": "Save Data",
+      "operation": {
+        "name": "save_csv",
+        "description": "Save data to a CSV file",
+        "parameters": {
+          "filepath": "output_5_steps.csv"
+        }
+      }
+    }
+  ]
+}

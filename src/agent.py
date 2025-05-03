@@ -27,7 +27,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 def default_solver() -> Solver:
     # the below is the solver we will use if no task-specific solver is provided
     return basic_agent(
-        tools=[bash(timeout=60), python(timeout=60)],
+        tools=[bash(timeout=120), python(timeout=120)],
         # the submit_description field can be used to provide a hint to the solver about the expected output format
         submit_description="Finished",
     )
@@ -41,15 +41,23 @@ def process_complete_pipeline(stage_op):
     
     prompt = f"""
     You are a Python data engineer. You need to implement and execute a data pipeline.
-    Here is the name of the operation: {stage_op['name']}, here is the description: {stage_op['description']}
-    load the data from the follwoing location {pipeline_spec['stages'][0]['operation']['parameters']['input_filepath']}
-    Here is the name of the coolumn that opeation will be applied to: {stage_op['parameters']['columns']}
-    save the data to the follwoing location {pipeline_spec['stages'][0]['operation']['parameters']['output_filepath']}
-    Once you finished the operation, submit the string "Finished".  
+
+    IMPORTANT: Execute ALL of the following steps in a SINGLE Python code block:
+    1. Import all necessary libraries
+    2. Load the data from: {pipeline_spec['stages'][0]['operation']['parameters']['input_filepath']}
+    3. Perfrom the following operation(s): {stage_op['name']}, here is the description: {stage_op['description']} and here is the column to perfrom it on: {stage_op['parameters']['columns']}
+    4. Save the processed data to: {pipeline_spec['stages'][0]['operation']['parameters']['output_filepath']}
+    
+    Do NOT split your code into multiple separate executions. Write ONE complete script that performs all steps.
+    It is VERY important that you save the result file in a single execution, otherwise you get an automatic score of zero!
+    
+    After saving the file successfully, output the string "Finished".
     """
 
+    logger.info(f"Input folder: {pipeline_spec['stages'][0]['operation']['parameters']['input_filepath']}")
+    logger.info(f"Output folder: {pipeline_spec['stages'][0]['operation']['parameters']['output_filepath']}")
+
     # Create a basic agent with the available tools
-    
     sample = Sample(input=prompt)
     
     # Create a basic agent with the available tools
@@ -72,7 +80,6 @@ if __name__ == "__main__":
 
     dataframe_path = "./data/input_data.csv"
     
-    # Run the evaluation with the agent
     results = eval(process_complete_pipeline(stage_op), model="openai/gpt-4o")
     
     # The agent will have executed the code and shown the results in its response

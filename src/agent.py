@@ -99,53 +99,140 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
         output_filepath = pipeline_spec['stages'][-1]['parameters']['filepath']
         direct_log(f"Output file from spec: {output_filepath}")
         
-        # File path resolution
+        # Current directory info for debugging
         cwd = os.getcwd()
         direct_log(f"Current working directory: {cwd}")
         ls_output = os.listdir('.')
         direct_log(f"Files in current directory: {', '.join(ls_output[:5])}" + 
                   (f"... and {len(ls_output)-5} more" if len(ls_output) > 5 else ""))
         
-        # Try multiple potential file paths
-        potential_paths = [
-            output_filepath,                               # As specified
-            os.path.abspath(output_filepath),              # Absolute path
-            os.path.join(cwd, output_filepath),            # Relative to cwd
-            f"./data/{output_filepath}",                   # In data folder
-            f"/tmp/{output_filepath}",                     # In tmp folder
-            f"/mnt/data/{output_filepath}"                 # Docker common mount point
-        ]
-        
-        # Check if output file exists
-        output_found = False
-        for path in potential_paths:
-            if os.path.exists(path):
-                output_filepath = path
-                direct_log(f"FOUND OUTPUT FILE: {path}")
-                output_found = True
-                break
+        # Try to extract the dataframe from CSV markers in agent answer
+        agent_df = None
+        direct_log("Checking for CSV markers in agent's answer...")
+        if "===CSV_START===" in answer and "===CSV_END===" in answer:
+            try:
+                csv_content = answer.split("===CSV_START===")[1].split("===CSV_END===")[0].strip()
+                direct_log(f"Found CSV content, length: {len(csv_content)}")
+                direct_log(f"CSV content preview: {csv_content[:200]}...")
                 
-        if not output_found:
-            direct_log("OUTPUT FILE NOT FOUND in any of these locations:")
+                # Parse the CSV content into a dataframe
+                import io
+                agent_df = pd.read_csv(io.StringIO(csv_content))
+                direct_log(f"Successfully created dataframe from CSV markers: {agent_df.shape}")
+                direct_log(f"Columns: {list(agent_df.columns)}")
+            except Exception as e:
+                direct_log(f"Error parsing CSV content: {str(e)}")
+                direct_log(traceback.format_exc())
+        else:
+            direct_log("CSV markers not found in agent's answer")
+        
+        # If we couldn't extract a dataframe from CSV markers, try file-based approach
+        if agent_df is None:
+            direct_log("Could not extract dataframe from answer, trying file-based approach...")
+            
+            # Try multiple potential file paths for the output file
+            potential_paths = [
+                output_filepath,                               # As specified
+                os.path.abspath(output_filepath),              # Absolute path
+                os.path.join(cwd, output_filepath),            # Relative to cwd
+                f"./data/{output_filepath}",                   # In data folder
+                f"/tmp/{output_filepath}",                     # In tmp folder
+                f"/mnt/data/{output_filepath}"                 # Docker common mount point
+            ]
+            
+            # Check if output file exists
+            output_found = False
             for path in potential_paths:
-                direct_log(f"  - {path} : {'EXISTS' if os.path.exists(path) else 'NOT FOUND'}")
-            details.append(f"Output file not found: {output_filepath}")
-            return Score(
-                value=score_value,
-                explanation="Output file not found",
-                answer=answer[:100] + "..." if len(answer) > 100 else answer,
-                metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
-            )
+                if os.path.exists(path):
+                    output_filepath = path
+                    direct_log(f"FOUND OUTPUT FILE: {path}")
+                    output_found = True
+                    break
+                    
+            if not output_found:
+                direct_log("OUTPUT FILE NOT FOUND in any of these locations:")
+                for path in potential_paths:
+                    direct_log(f"  - {path} : {'EXISTS' if os.path.exists(path) else 'NOT FOUND'}")
+                
+                # Try to extract a dataframe from the printed output
+                try:
+                    if "df.head()" in answer:
+                        direct_log("Attempting to extract dataframe from df.head() output...")
+                        # Try to extract the actual dataframe content after df.head()
+                        df_section = answer.split("df.head()")[1].strip()
+                        # Find where the dataframe output ends (usually before "Finished")
+                        if "Finished" in df_section:
+                            df_section = df_section.split("Finished")[0].strip()
+                        
+                        direct_log(f"Found dataframe section: {df_section[:200]}...")
+                        
+                        # Try to parse this as a dataframe
+                        import re
+                        
+                        # Extract column names
+                        column_line = df_section.split('\n')[0] if '\n' in df_section else ""
+                        column_names = re.findall(r'\s+(\w+)', column_line)
+                        direct_log(f"Extracted column names: {column_names}")
+                        
+                        # Extract data rows
+                        rows = []
+                        for line in df_section.split('\n')[1:]:
+                            if line.strip() and re.match(r'^\d+', line.strip()):
+                                # Extract values using regex
+                                values = re.findall(r'\s+([^\s]+)', line)
+                                if values:
+                                    rows.append(values)
+                        
+                        if column_names and rows:
+                            # Create a small dataframe from the extracted data
+                            agent_df = pd.DataFrame(rows, columns=column_names)
+                            direct_log(f"Created extracted dataframe with shape: {agent_df.shape}")
+                        else:
+                            direct_log("Couldn't extract valid dataframe from printed output")
+                except Exception as e:
+                    direct_log(f"Error extracting dataframe from answer: {str(e)}")
+                    direct_log(traceback.format_exc())
+                
+                if agent_df is None:
+                    details.append(f"Output file not found: {output_filepath}")
+                    return Score(
+                        value=score_value,
+                        explanation="Output file not found and couldn't extract dataframe from output",
+                        answer=answer[:100] + "..." if len(answer) > 100 else answer,
+                        metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
+                    )
+            
+            # If file was found but we don't have a dataframe yet, load it
+            if agent_df is None and output_found:
+                try:
+                    direct_log(f"Loading agent dataframe from: {output_filepath}")
+                    agent_df = pd.read_csv(output_filepath)
+                    direct_log(f"Agent dataframe loaded: {agent_df.shape}, first few columns: {list(agent_df.columns)[:3]}")
+                except Exception as e:
+                    direct_log(f"Error loading agent dataframe from file: {str(e)}")
+                    details.append(f"Error loading output file: {str(e)}")
+                    return Score(
+                        value=score_value,
+                        explanation=f"Error loading output file: {str(e)}",
+                        answer=answer[:100] + "..." if len(answer) > 100 else answer,
+                        metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
+                    )
         
         try:
-            # Load dataframes
-            direct_log(f"Loading agent dataframe from: {output_filepath}")
-            agent_df = pd.read_csv(output_filepath)
-            direct_log(f"Agent dataframe loaded: {agent_df.shape}, first few columns: {list(agent_df.columns)[:3]}")
-            
+            # Load ground truth dataframe
             direct_log(f"Loading ground truth dataframe from: {ground_truth_path}")
             ground_truth_df = pd.read_csv(ground_truth_path)
             direct_log(f"Ground truth dataframe loaded: {ground_truth_df.shape}, first few columns: {list(ground_truth_df.columns)[:3]}")
+            
+            # Check if dataframes were loaded successfully
+            if agent_df is None:
+                direct_log("ERROR: Agent dataframe is None")
+                return Score(
+                    value=0.0,
+                    explanation="Failed to load agent dataframe",
+                    answer=answer[:100] + "..." if len(answer) > 100 else answer,
+                    metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
+                )
             
             # Get the processing stages (skip data loading stage)
             processing_stages = pipeline_spec['stages'][1:n_stages+1]
@@ -401,7 +488,8 @@ def process_complete_pipeline(pipeline_spec, n):
     Do NOT split your code into multiple separate executions. Write ONE complete script that performs all steps.
     It is VERY important that you save the result file in a single execution, otherwise you get an automatic score of zero!
     
-    After saving the file successfully, output the string "Finished".
+    After saving the file successfully:
+    Output the string "Finished".
     """
 
     logger.info(f"Input file: {input_filepath}")

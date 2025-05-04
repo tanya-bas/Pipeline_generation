@@ -1,18 +1,23 @@
-# Procedural Pipeline Generation
+# Procedural Pipeline Generation: A Framework for Automated Data Processing
 
-## Generation Algorithm
+## Research Overview
+This project investigates the generation and validation of procedural data processing pipelines. We explore how automated agents can construct and execute multi-step data transformation sequences with increasing complexity levels.
 
-1. Select N operations (where N scales with difficulty)
-2. Generate parameters for each operation
-4. Add path for the Intermediary output 
+## Generation Methodology
+Our approach employs the following methodology:
+1. Dynamic operation selection (N operations, where N correlates with difficulty level)
+2. Parameter generation for each operation with controlled stochasticity
+3. Intermediary state preservation between pipeline stages
 
-## Data State Validation
-- After each operation, create a checkpoint file containing a hash of the data state
-- Provide a validation tool that checks if the current data state matches expected checkpoints
-- The agent must pass validation at each step before proceeding
+## Validation Framework
+- Checkpoint validation using cryptographic hashing of intermediate data states
+- Real-time validation tooling to verify pipeline execution against expected states
+- Gate-keeping validation to ensure correctness before subsequent operations
 
 ## Evaluation Metrics
+1. **Execution Accuracy**: Quantitative assessment of output correctness at each pipeline stage
+2. **Error Resilience**: Measurement of agent adaptability to non-standard data patterns
+3. **Complexity Threshold Analysis**: Empirical determination of pipeline complexity at which agent performance degrades
 
-1. **Correctness**: Does each step produce the expected output?
-2. **Robustness**: How well does the agent handle unexpected data patterns?
-3. Breaking point: At what pipeline complexity does the agent fail?
+## Applications
+This research has potential applications in automated ETL processes, reproducible data science workflows, and robotic process automation.

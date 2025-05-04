@@ -1,0 +1,132 @@
+{
+  "name": "Generated Pipeline (10 steps)",
+  "description": "Data pipeline with fixed number of preprocessing steps",
+  "data_path": "./data/input_data.csv",
+  "stages": [
+    {
+      "id": "stage_0",
+      "name": "csv_loader",
+      "description": "Load data from a CSV file",
+      "parameters": {
+        "filepath": "./data/input_data.csv"
+      }
+    },
+    {
+      "id": "stage_1",
+      "name": "fill_na",
+      "description": "Fill missing values with a specified value",
+      "parameters": {
+        "columns": [
+          "column_1"
+        ]
+      }
+    },
+    {
+      "id": "stage_2",
+      "name": "outlier_removal",
+      "description": "Remove outliers based on z-score threshold",
+      "parameters": {
+        "threshold": 3.0,
+        "columns": [
+          "column_2"
+        ]
+      }
+    },
+    {
+      "id": "stage_3",
+      "name": "normalize",
+      "description": "Scale values to 0-1 range",
+      "parameters": {
+        "method": "minmax",
+        "columns": [
+          "column_3"
+        ]
+      }
+    },
+    {
+      "id": "stage_4",
+      "name": "log_transform",
+      "description": "Apply logarithmic transformation to numeric columns",
+      "parameters": {
+        "base": 10,
+        "columns": [
+          "column_4"
+        ]
+      }
+    },
+    {
+      "id": "stage_5",
+      "name": "clip_values",
+      "description": "Clip values to specified minimum and maximum",
+      "parameters": {
+        "min_value": 0,
+        "max_value": 100,
+        "columns": [
+          "column_5"
+        ]
+      }
+    },
+    {
+      "id": "stage_6",
+      "name": "multiply_by",
+      "description": "Multiply column values by a constant",
+      "parameters": {
+        "value": 100,
+        "columns": [
+          "column_6"
+        ]
+      }
+    },
+    {
+      "id": "stage_7",
+      "name": "round_values",
+      "description": "Round numeric values to integers",
+      "parameters": {
+        "columns": [
+          "column_7"
+        ]
+      }
+    },
+    {
+      "id": "stage_8",
+      "name": "one_hot_encode",
+      "description": "One-hot encode categorical columns",
+      "parameters": {
+        "columns": [
+          "fruits"
+        ]
+      }
+    },
+    {
+      "id": "stage_9",
+      "name": "upper_case",
+      "description": "Convert string columns to uppercase",
+      "parameters": {
+        "columns": [
+          "cities"
+        ]
+      }
+    },
+    {
+      "id": "stage_10",
+      "name": "time_features",
+      "description": "Extract date/time components from timestamp column",
+      "parameters": {
+        "features": [
+          "year",
+          "month",
+          "day"
+        ],
+        "column": "date"
+      }
+    },
+    {
+      "id": "stage_11",
+      "name": "save_csv",
+      "description": "Save data to a CSV file",
+      "parameters": {
+        "filepath": "output_10_steps.csv"
+      }
+    }
+  ]
+}

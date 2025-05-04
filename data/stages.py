@@ -49,12 +49,6 @@ OPERATIONS = {
         "default_params": {"columns" : "column_7"}
     },
 
-    "one_hot_encode": {
-        "description": "One-hot encode categorical columns",
-        "parameters": ["columns"],
-        "default_params": {"columns" : "fruits"}
-    },
-
     "upper_case": {
         "description": "Convert string columns to uppercase",
         "parameters": ["columns"],
@@ -65,6 +59,12 @@ OPERATIONS = {
         "description": "Extract date/time components from timestamp column",
         "parameters": ["column", "features"],
         "default_params": {"features": ["year", "month", "day"], "column" : "date"}
+    },
+
+    "one_hot_encode": {
+        "description": "One-hot encode categorical columns",
+        "parameters": ["columns"],
+        "default_params": {"columns" : "fruits"}
     },
     
 }

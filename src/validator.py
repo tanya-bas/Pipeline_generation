@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple, Any, Optional
 
 class PipelineValidator:
     """
-    A simplified validator that scores pipeline stages by comparing original and modified CSV files.
+    A validator that scores pipeline stages by comparing original and modified CSV files.
     """
     def __init__(self, pipeline_spec_path: str):
         """
@@ -399,10 +399,23 @@ class PipelineValidator:
 
 
 if __name__ == "__main__":
-    # Example usage
-    validator = SimplePipelineValidator("./data/pipeline_spec_10.json")
-    results = validator.validate("./data/input_data.csv", "./data/output_10_steps.csv")
-    validator.save_results("./data/validation_results.json")
+    spec_path = "/Users/tetianabas/Documents/Pipeline_generation/data/pipeline_spec_10.json"
+    input_path = "/Users/tetianabas/Documents/Pipeline_generation/data/input_data.csv"
+    output_path = "/Users/tetianabas/Documents/Pipeline_generation/data/ground_truth_data.csv"
+
+
+    validator = PipelineValidator(spec_path)
+    input_df = pd.read_csv(input_path)
     
-    print(f"Validation Score: {results['score']}/{results['total_stages']} ({results['success_percentage']:.1f}%)")
-    print("Detailed results saved to validation_results.json")
+    # Apply transformations
+    result_df = input_df.copy()
+    for stage in validator.stages[1:-1]:  # Skip first and last stages
+        stage_name = stage['name']
+        stage_params = stage['parameters']
+        result_df = validator._apply_transformation(result_df, stage_name, stage_params)
+        print(f"Applied {stage_name} transformation")
+    
+    # Save result
+    result_df.to_csv(output_path, index=False)
+    breakpoint()
+    print(f"Ground truth data saved to {output_path}")

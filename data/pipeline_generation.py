@@ -31,34 +31,42 @@ class PipelineGenerator:
         self.n_steps = n_preprocessing_steps
         self.operations = OPERATIONS
         self.pipeline_spec = {}
-        self.used_operations = set()
-        self.used_columns = set()
         
-        # Define available columns based on data generation
-        self.numeric_columns = [f"column_{i+1}" for i in range(8)]
-        self.categorical_columns = ["fruits", "cities"]
-        self.date_columns = ["date"]
-        self.all_columns = self.numeric_columns + self.categorical_columns + self.date_columns
-
-    def _get_available_columns(self, operation_name: str) -> List[str]:
-        """Get available columns suitable for the operation type"""
-        # Special case for specific operations
-        if operation_name == "one_hot_encode":
-            return ["fruits"] if "fruits" not in self.used_columns else []
-        elif operation_name == "upper_case":
-            return ["cities"] if "cities" not in self.used_columns else []
-        elif operation_name in ["time_features"]:
-            return [col for col in self.date_columns if col not in self.used_columns]
-        else:  # Operations that work on numeric columns
-            return [col for col in self.numeric_columns if col not in self.used_columns]
-
+        # Define column mappings for default parameters
+        self.column_mappings = {
+            "column_1": "column_1",
+            "column_2": "column_2",
+            "column_3": "column_3",
+            "column_4": "column_4",
+            "column_5": "column_5",
+            "column_6": "column_6",
+            "column_7": "column_7",
+            "column_8": "column_8",
+            "fruits": "fruits",
+            "cities": "cities",
+            "date": "date"
+        }
+        
+    def _fix_column_references(self, params: Dict) -> Dict:
+        """Convert column references to actual column names"""
+        fixed_params = params.copy()
+        
+        # Fix column parameter
+        if "columns" in fixed_params and not isinstance(fixed_params["columns"], list):
+            col_ref = str(fixed_params["columns"])
+            if col_ref in self.column_mappings:
+                fixed_params["columns"] = [self.column_mappings[col_ref]]
+        
+        # Fix single column parameter
+        if "column" in fixed_params and not isinstance(fixed_params["column"], str):
+            col_ref = str(fixed_params["column"])
+            if col_ref in self.column_mappings:
+                fixed_params["column"] = self.column_mappings[col_ref]
+                
+        return fixed_params
+        
     def generate_pipeline(self, data_path: str) -> Dict:
-        """Generate a random data processing pipeline based on difficulty with no repeating operations"""
-        self.used_operations = set()
-        self.used_columns = set()
-
-        total_operations = min(self.n_steps, len(self.operations))
-
+        """Generate a deterministic data processing pipeline using the first n operations"""
         # Generate pipeline stages
         pipeline = {
             "name": f"Generated Pipeline ({self.n_steps} steps)",
@@ -67,101 +75,46 @@ class PipelineGenerator:
             "stages": []
         }
 
-        # 1. Always start with one from DATA_LOADERS
-        loader_name = random.choice(list(DATA_LOADERS.keys()))
-        loader = self._create_operation(loader_name, DATA_LOADERS[loader_name])
-        loader["parameters"]["filepath"] = data_path
+        # 1. Always start with the first DATA_LOADER
+        loader_name = list(DATA_LOADERS.keys())[0]
+        loader_config = DATA_LOADERS[loader_name]
         pipeline["stages"].append({
             "id": "stage_0",
-            "name": "Data Loading",
-            "operation": loader
+            "name": loader_name,
+            "description": loader_config["description"],
+            "parameters": {"filepath": data_path}
         })
 
-        # 2. Always make fill_na the first operation after loading
-        fill_na_config = self.operations["fill_na"]
-        fill_na_operation = self._create_operation("fill_na", fill_na_config)
-        pipeline["stages"].append({
-            "id": "stage_1",
-            "name": "Fill Missing Values",
-            "operation": fill_na_operation
-        })
-        self.used_operations.add("fill_na")
-
-        # 3. Add remaining operations
-        available_ops = [op for op in list(self.operations.keys()) if op != "fill_na"]
-        random.shuffle(available_ops)
-        
-        remaining_ops = min(total_operations - 1, len(available_ops))  # -1 for fill_na
-        
-        for i in range(remaining_ops):
-            op_name = available_ops[i]
+        # 2. Add operations in order from OPERATIONS
+        op_names = list(self.operations.keys())
+        for i in range(min(self.n_steps, len(op_names))):
+            op_name = op_names[i]
             op_config = self.operations[op_name]
-            operation = self._create_operation(op_name, op_config)
-
+            
+            # Get default parameters and fix column references
+            params = op_config.get("default_params", {}).copy()
+            params = self._fix_column_references(params)
+            
             pipeline["stages"].append({
-                "id": f"stage_{i+2}",  
-                "name": f"Process Step {i+2}",
-                "operation": operation
+                "id": f"stage_{i+1}",
+                "name": op_name,
+                "description": op_config.get("description", ""),
+                "parameters": params
             })
 
-            self.used_operations.add(op_name)
-
         # 3. Always end with save
+        saver_name = list(SAVING_OPERATIONS.keys())[0]
+        saver_config = SAVING_OPERATIONS[saver_name]
         
-        saver_name = random.choice(list(SAVING_OPERATIONS.keys()))
-        saver = self._create_operation(saver_name, SAVING_OPERATIONS[saver_name])
-        saver["parameters"]["filepath"] = f"output_{self.n_steps}_steps.csv"
         pipeline["stages"].append({
-            "id": f"stage_{self.n_steps+1}",
-            "name": "Save Data",
-            "operation": saver
+            "id": f"stage_{len(pipeline['stages'])}",
+            "name": saver_name,
+            "description": saver_config["description"],
+            "parameters": {"filepath": f"output_{self.n_steps}_steps.csv"}
         })
 
         self.pipeline_spec = pipeline
         return pipeline
-
-    def _create_operation(self, op_name: str, op_config: Dict) -> Dict:
-        """Create an operation with appropriate parameters"""
-        params = op_config.get("default_params", {}).copy()
-        
-        # Handle column selection based on operation type
-        if "columns" in op_config.get("parameters", []):
-            # Special cases for specific operations
-            if op_name == "one_hot_encode":
-                params["columns"] = ["fruits"]
-            elif op_name == "upper_case":
-                params["columns"] = ["cities"]
-            elif op_name == "time_features":
-                params["columns"] = ["date"]
-            else:
-                # For other operations, find an unused numeric column
-                available_cols = [col for col in self.numeric_columns 
-                                 if col not in self.used_columns]
-                
-                if available_cols:
-                    selected_column = random.choice(available_cols)
-                    params["columns"] = [selected_column]
-                    self.used_columns.add(selected_column)
-                else:
-                    # If all columns used, just pick a random numeric column
-                    params["columns"] = [random.choice(self.numeric_columns)]
-        
-        # Operation-specific parameter logic
-        if op_name == "fill_na":
-            params["value"] = random.choice([0, -1, "mean", "median", "mode"])
-            params["method"] = random.choice(["constant", "ffill", "bfill"]) if params["value"] in ["mean", "median", "mode"] else "constant"
-        elif op_name == "normalize":
-            params["method"] = random.choice(["minmax", "zscore", "robust"])
-        elif op_name == "one_hot_encode":
-            params["drop_first"] = random.choice([True, False])
-        elif op_name == "correlation":
-            params["method"] = random.choice(["pearson", "spearman"])
-
-        return {
-            "name": op_name,
-            "description": op_config.get("description", ""),
-            "parameters": params
-        }
 
     def get_pipeline_spec(self) -> Dict:
         """Return the generated pipeline specification"""
@@ -177,9 +130,9 @@ class PipelineGenerator:
 
 if __name__ == "__main__":
     # Generate pipeline
-    pipeline_generator = PipelineGenerator(n_preprocessing_steps=5)
+    pipeline_generator = PipelineGenerator(n_preprocessing_steps=10)
     pipeline = pipeline_generator.generate_pipeline("./data/input_data.csv")
-    pipeline_generator.save_pipeline_spec("./data/pipeline_spec.json")
+    pipeline_generator.save_pipeline_spec("./data/pipeline_spec_10.json")
     
     # Print generated pipeline for verification
     print("Pipeline generated and saved to pipeline_spec.json")

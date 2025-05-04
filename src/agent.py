@@ -8,6 +8,11 @@ from inspect_ai.tool import bash, python
 from inspect_ai.scorer import Score, accuracy, stderr, scorer
 import logging
 import sys
+import pandas as pd
+import numpy as np
+from pathlib import Path
+# Import the validator
+from validator import PipelineValidator
 
 # Set up logging
 logging.basicConfig(
@@ -38,69 +43,188 @@ def debug_print(message):
     print(f"DEBUG: {message}")
     logger.info(f"DEBUG: {message}")
 
-# Simple custom scorer with required metrics parameter
+# Validation-based scorer using direct column comparison
 @scorer(metrics=[accuracy(), stderr()])
-def simple_pipeline_scorer():
+def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_stages):
     """
-    A simple scorer that checks for basic elements in the agent's code.
+    A scorer that evaluates the accuracy of data transformations by directly comparing 
+    affected columns between agent output and ground truth data.
     """
     async def score(state, target):
         answer = state.output.completion
+        
+        # Default score values
         score_value = 0.0
         details = []
+        successful_stages = 0
+        total_stages = n_stages
         
-        # Check for dataframe usage (check for common variable names: df, data, dataframe)
-        dataframe_vars = ["df", "data", "dataframe"]
-        has_dataframe = any(var in answer for var in dataframe_vars)
-        if has_dataframe:
-            score_value += 0.2
+        # Check if the output indicates the agent completed the task
+        if "Finished" not in answer:
+            details.append("Agent did not complete execution")
+            return Score(
+                value=score_value,
+                explanation="Agent did not complete the task",
+                answer=answer[:100] + "..." if len(answer) > 100 else answer,
+                metadata={"details": details, "successful_stages": 0, "total_stages": total_stages}
+            )
         
-        # Check for pandas import
-        pandas_imports = ["import pandas", "from pandas import"]
-        has_pandas = any(imp in answer for imp in pandas_imports)
-        if has_pandas:
-            score_value += 0.2
+        # Get the output file path from the pipeline spec
+        output_filepath = pipeline_spec['stages'][-1]['parameters']['filepath']
         
-        # Check for data operation keywords
-        operation_keywords = ["fillna", "fill_na", "fill", "replace", "na", "missing", "ffill", "bfill", "interpolate"]
-        found_operations = [kw for kw in operation_keywords if kw.lower() in answer.lower()]
-        if found_operations:
-            score_value += 0.2
+        # Check if output file exists
+        if not os.path.exists(output_filepath):
+            details.append(f"Output file not found: {output_filepath}")
+            return Score(
+                value=score_value,
+                explanation="Output file not found",
+                answer=answer[:100] + "..." if len(answer) > 100 else answer,
+                metadata={"details": details, "successful_stages": 0, "total_stages": total_stages}
+            )
         
-        # Check for CSV save operation
-        csv_save_patterns = [".to_csv", "save_csv", "write_csv", "save", "to_csv"]
-        has_csv_save = any(pattern in answer for pattern in csv_save_patterns)
-        if has_csv_save:
-            score_value += 0.2
-        
-        # Check for task completion
-        if "Finished" in answer:
-            score_value += 0.2
-        
-        explanation = "Simple pipeline validation: " + " | ".join(details)
-        
-        # Add detailed metadata for debugging
-        metadata = {
-            "details": details,
-            "code_snippet": answer[:500] + "..." if len(answer) > 500 else answer,
-            "checks": {
-                "dataframe_usage": has_dataframe,
-                "pandas_import": has_pandas,
-                "operation_usage": len(found_operations) > 0,
-                "csv_save": has_csv_save,
-                "task_completed": "Finished" in answer
-            }
-        }
-        
-        debug_print(f"Final score: {score_value}")
-        debug_print(f"Check results: {metadata['checks']}")
-        
-        return Score(
-            value=score_value,
-            explanation=explanation,
-            answer=answer[:100] + "..." if len(answer) > 100 else answer,
-            metadata=metadata
-        )
+        try:
+            # Load dataframes
+            agent_df = pd.read_csv(output_filepath)
+            ground_truth_df = pd.read_csv(ground_truth_path)
+            
+            # Get the processing stages (skip data loading stage)
+            processing_stages = pipeline_spec['stages'][1:n_stages+1]
+            
+            # For each stage, check if the affected columns match between agent output and ground truth
+            stage_results = {}
+            
+            for i, stage in enumerate(processing_stages):
+                stage_id = stage['id']
+                stage_name = stage['name']
+                stage_params = stage['parameters']
+                
+                # Get columns affected by this stage
+                affected_columns = []
+                
+                # Handle different stage types
+                if stage_name == 'fill_na':
+                    columns = stage_params.get('columns', [])
+                    if isinstance(columns, str):
+                        affected_columns = [columns]
+                    else:
+                        affected_columns = columns
+                
+                elif stage_name == 'one_hot_encode':
+                    # One-hot encoding creates new columns
+                    col = stage_params.get('columns', '')
+                    if isinstance(col, list):
+                        col = col[0]  # Usually one column is one-hot encoded
+                    
+                    # Find columns with the prefix in both dataframes
+                    agent_one_hot_cols = [c for c in agent_df.columns if c.startswith(f'{col}_')]
+                    ground_truth_one_hot_cols = [c for c in ground_truth_df.columns if c.startswith(f'{col}_')]
+                    
+                    # Only compare columns that exist in both
+                    affected_columns = [c for c in agent_one_hot_cols if c in ground_truth_one_hot_cols]
+                
+                elif stage_name == 'time_features':
+                    column = stage_params.get('column', '')
+                    features = stage_params.get('features', ['year', 'month', 'day'])
+                    affected_columns = [f'{column}_{feature}' for feature in features]
+                
+                else:
+                    # For most other operations, the 'columns' parameter indicates affected columns
+                    columns = stage_params.get('columns', [])
+                    if isinstance(columns, str):
+                        affected_columns = [columns]
+                    else:
+                        affected_columns = columns
+                
+                # Check if columns exist in both dataframes
+                missing_cols = [col for col in affected_columns if col not in agent_df.columns or col not in ground_truth_df.columns]
+                if missing_cols:
+                    stage_results[stage_id] = {
+                        'name': stage_name,
+                        'success': False,
+                        'details': {'message': f'Missing columns: {missing_cols}'}
+                    }
+                    logger.info(f"Stage {stage_id} ({stage_name}): ✗ Missing columns: {missing_cols}")
+                    continue
+                
+                # Compare each affected column
+                columns_match = True
+                column_differences = {}
+                
+                for col in affected_columns:
+                    # Skip non-existent columns
+                    if col not in agent_df.columns or col not in ground_truth_df.columns:
+                        continue
+                        
+                    # For numeric columns, use approximate comparison
+                    if pd.api.types.is_numeric_dtype(agent_df[col]) and pd.api.types.is_numeric_dtype(ground_truth_df[col]):
+                        try:
+                            # Use numpy's allclose for numeric comparison with tolerance
+                            if not np.allclose(agent_df[col].fillna(0).values, 
+                                              ground_truth_df[col].fillna(0).values, 
+                                              rtol=1e-5, atol=1e-8, equal_nan=True):
+                                columns_match = False
+                                column_differences[col] = {'message': 'Values do not match within tolerance'}
+                                debug_print(f"Column {col} values don't match")
+                        except Exception as e:
+                            # Fallback to equals if allclose fails
+                            if not agent_df[col].equals(ground_truth_df[col]):
+                                columns_match = False
+                                column_differences[col] = {'message': f'Values do not match: {str(e)}'}
+                                debug_print(f"Column {col} equals check failed: {str(e)}")
+                    
+                    # For non-numeric columns, use exact comparison
+                    else:
+                        if not agent_df[col].equals(ground_truth_df[col]):
+                            columns_match = False
+                            column_differences[col] = {'message': 'Values do not match'}
+                            debug_print(f"Column {col} (non-numeric) values don't match")
+                
+                if columns_match:
+                    successful_stages += 1
+                    stage_results[stage_id] = {
+                        'name': stage_name,
+                        'success': True,
+                        'details': {}
+                    }
+                    logger.info(f"Stage {stage_id} ({stage_name}): ✓ Columns match")
+                else:
+                    stage_results[stage_id] = {
+                        'name': stage_name,
+                        'success': False,
+                        'details': {'differences': column_differences}
+                    }
+                    logger.info(f"Stage {stage_id} ({stage_name}): ✗ Column values don't match")
+            
+            # Calculate final score
+            score_value = successful_stages / total_stages if total_stages > 0 else 0.0
+            success_percentage = score_value * 100
+            
+            explanation = f"Pipeline validation: {successful_stages}/{total_stages} stages correct ({success_percentage:.1f}%)"
+            debug_print(explanation)
+            
+            return Score(
+                value=score_value,
+                explanation=explanation,
+                answer=answer[:100] + "..." if len(answer) > 100 else answer,
+                metadata={
+                    "details": details,
+                    "stage_results": stage_results,
+                    "successful_stages": successful_stages,
+                    "total_stages": total_stages,
+                    "success_percentage": success_percentage
+                }
+            )
+            
+        except Exception as e:
+            logger.info(f"Validation error: {str(e)}")
+            debug_print(f"Error during validation: {str(e)}")
+            
+            return Score(
+                value=0.0,
+                explanation=f"Error during validation: {str(e)}",
+                answer=answer[:100] + "..." if len(answer) > 100 else answer,
+                metadata={"details": details, "error": str(e)}
+            )
 
     return score
 
@@ -157,7 +281,7 @@ def process_complete_pipeline(pipeline_spec, n):
     logger.info(f"Input file: {input_filepath}")
     logger.info(f"Output file: {output_filepath}")
     logger.info(f"Processing {n} stages")
-    logger.info(f"Prompt: {prompt}")
+    # logger.info(f"Prompt: {prompt}")
 
     # Create a basic agent with the available tools
     sample = Sample(input=prompt)
@@ -174,17 +298,24 @@ def process_complete_pipeline(pipeline_spec, n):
         """
     )
     
+    # Get file paths
+    input_path = pipeline_spec['data_path']
+    ground_truth_path = "/Users/tetianabas/Documents/Pipeline_generation/data/ground_truth_data.csv"
+    pipeline_spec_path = "./data/pipeline_spec_10.json"
+    
     return Task(
         dataset=[sample], 
         solver=agent, 
         sandbox="docker", 
-        scorer=simple_pipeline_scorer()
+        scorer=validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n)
     )
 
 if __name__ == "__main__":
     pipeline_spec = json.load(open("./data/pipeline_spec_10.json"))
-    n_stages = 5  
-    
+    input_path = "/Users/tetianabas/Documents/Pipeline_generation/data/input_data.csv"
+    ground_truth_path = "/Users/tetianabas/Documents/Pipeline_generation/data/ground_truth_data.csv"
+
+    n_stages = 1
     print(f"Processing pipeline with {n_stages} operations")
     
     # Run the task with our scorer

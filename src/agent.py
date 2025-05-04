@@ -11,6 +11,8 @@ import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import time
+import traceback
 # Import the validator
 from validator import PipelineValidator
 
@@ -25,6 +27,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pipeline")
 
+# Create a direct file logging method that doesn't rely on Python's logging
+VALIDATOR_LOG_FILE = os.path.abspath("validator_trace.log")
+
+def direct_log(message):
+    """Write directly to a file without using logging module"""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(VALIDATOR_LOG_FILE, "a") as f:
+        f.write(f"[{timestamp}] {message}\n")
+        f.flush()  # Force write to disk
+    
+    # Also print to stdout as a backup
+    print(f"[VALIDATOR] {message}")
+    sys.stdout.flush()  # Force flush to make sure it appears in logs
+
+# Clear the log file at the start
+with open(VALIDATOR_LOG_FILE, "w") as f:
+    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] === VALIDATOR LOG STARTED ===\n")
+    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Log file path: {VALIDATOR_LOG_FILE}\n")
+
+print(f"Validator log file: {VALIDATOR_LOG_FILE}")
+
 python_tool = python()
 dotenv.load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -38,11 +61,6 @@ def default_solver() -> Solver:
         submit_description="Finished",
     )
 
-# Debug function to log what checks are passing/failing
-def debug_print(message):
-    print(f"DEBUG: {message}")
-    logger.info(f"DEBUG: {message}")
-
 # Validation-based scorer using direct column comparison
 @scorer(metrics=[accuracy(), stderr()])
 def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_stages):
@@ -53,6 +71,12 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
     async def score(state, target):
         answer = state.output.completion
         
+        # Direct logging
+        direct_log(f"===== VALIDATION STARTED =====")
+        direct_log(f"Input path: {input_path}")
+        direct_log(f"Ground truth path: {ground_truth_path}")
+        direct_log(f"Number of stages: {n_stages}")
+        
         # Default score values
         score_value = 0.0
         details = []
@@ -60,35 +84,72 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
         total_stages = n_stages
         
         # Check if the output indicates the agent completed the task
+        direct_log(f"Checking if agent completed task...")
         if "Finished" not in answer:
+            direct_log("FAILED: Agent did not complete execution - 'Finished' not found in output")
             details.append("Agent did not complete execution")
             return Score(
                 value=score_value,
                 explanation="Agent did not complete the task",
                 answer=answer[:100] + "..." if len(answer) > 100 else answer,
-                metadata={"details": details, "successful_stages": 0, "total_stages": total_stages}
+                metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
             )
         
         # Get the output file path from the pipeline spec
         output_filepath = pipeline_spec['stages'][-1]['parameters']['filepath']
+        direct_log(f"Output file from spec: {output_filepath}")
+        
+        # File path resolution
+        cwd = os.getcwd()
+        direct_log(f"Current working directory: {cwd}")
+        ls_output = os.listdir('.')
+        direct_log(f"Files in current directory: {', '.join(ls_output[:5])}" + 
+                  (f"... and {len(ls_output)-5} more" if len(ls_output) > 5 else ""))
+        
+        # Try multiple potential file paths
+        potential_paths = [
+            output_filepath,                               # As specified
+            os.path.abspath(output_filepath),              # Absolute path
+            os.path.join(cwd, output_filepath),            # Relative to cwd
+            f"./data/{output_filepath}",                   # In data folder
+            f"/tmp/{output_filepath}",                     # In tmp folder
+            f"/mnt/data/{output_filepath}"                 # Docker common mount point
+        ]
         
         # Check if output file exists
-        if not os.path.exists(output_filepath):
+        output_found = False
+        for path in potential_paths:
+            if os.path.exists(path):
+                output_filepath = path
+                direct_log(f"FOUND OUTPUT FILE: {path}")
+                output_found = True
+                break
+                
+        if not output_found:
+            direct_log("OUTPUT FILE NOT FOUND in any of these locations:")
+            for path in potential_paths:
+                direct_log(f"  - {path} : {'EXISTS' if os.path.exists(path) else 'NOT FOUND'}")
             details.append(f"Output file not found: {output_filepath}")
             return Score(
                 value=score_value,
                 explanation="Output file not found",
                 answer=answer[:100] + "..." if len(answer) > 100 else answer,
-                metadata={"details": details, "successful_stages": 0, "total_stages": total_stages}
+                metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
             )
         
         try:
             # Load dataframes
+            direct_log(f"Loading agent dataframe from: {output_filepath}")
             agent_df = pd.read_csv(output_filepath)
+            direct_log(f"Agent dataframe loaded: {agent_df.shape}, first few columns: {list(agent_df.columns)[:3]}")
+            
+            direct_log(f"Loading ground truth dataframe from: {ground_truth_path}")
             ground_truth_df = pd.read_csv(ground_truth_path)
+            direct_log(f"Ground truth dataframe loaded: {ground_truth_df.shape}, first few columns: {list(ground_truth_df.columns)[:3]}")
             
             # Get the processing stages (skip data loading stage)
             processing_stages = pipeline_spec['stages'][1:n_stages+1]
+            direct_log(f"Processing {len(processing_stages)} stages: {[s['name'] for s in processing_stages]}")
             
             # For each stage, check if the affected columns match between agent output and ground truth
             stage_results = {}
@@ -97,6 +158,9 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                 stage_id = stage['id']
                 stage_name = stage['name']
                 stage_params = stage['parameters']
+                
+                direct_log(f"------- Stage {stage_id}: {stage_name} -------")
+                direct_log(f"Parameters: {json.dumps(stage_params)}")
                 
                 # Get columns affected by this stage
                 affected_columns = []
@@ -119,6 +183,9 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                     agent_one_hot_cols = [c for c in agent_df.columns if c.startswith(f'{col}_')]
                     ground_truth_one_hot_cols = [c for c in ground_truth_df.columns if c.startswith(f'{col}_')]
                     
+                    direct_log(f"One-hot encode columns in agent: {agent_one_hot_cols}")
+                    direct_log(f"One-hot encode columns in ground truth: {ground_truth_one_hot_cols}")
+                    
                     # Only compare columns that exist in both
                     affected_columns = [c for c in agent_one_hot_cols if c in ground_truth_one_hot_cols]
                 
@@ -135,15 +202,21 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                     else:
                         affected_columns = columns
                 
+                direct_log(f"Affected columns: {affected_columns}")
+                
                 # Check if columns exist in both dataframes
                 missing_cols = [col for col in affected_columns if col not in agent_df.columns or col not in ground_truth_df.columns]
                 if missing_cols:
+                    direct_log(f"ERROR: Missing columns: {missing_cols}")
+                    direct_log(f"Agent columns: {list(agent_df.columns)}")
+                    direct_log(f"Ground truth columns: {list(ground_truth_df.columns)}")
+                    
                     stage_results[stage_id] = {
                         'name': stage_name,
                         'success': False,
                         'details': {'message': f'Missing columns: {missing_cols}'}
                     }
-                    logger.info(f"Stage {stage_id} ({stage_name}): ✗ Missing columns: {missing_cols}")
+                    details.append(f"Stage {stage_id} ({stage_name}): ✗ Missing columns: {missing_cols}")
                     continue
                 
                 # Compare each affected column
@@ -154,30 +227,77 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                     # Skip non-existent columns
                     if col not in agent_df.columns or col not in ground_truth_df.columns:
                         continue
-                        
+                    
+                    direct_log(f"Comparing column: {col}")
+                    
                     # For numeric columns, use approximate comparison
                     if pd.api.types.is_numeric_dtype(agent_df[col]) and pd.api.types.is_numeric_dtype(ground_truth_df[col]):
                         try:
+                            # Log samples for comparison
+                            agent_sample = agent_df[col].head(3).tolist()
+                            gt_sample = ground_truth_df[col].head(3).tolist()
+                            direct_log(f"Sample values - Agent: {agent_sample}, Ground Truth: {gt_sample}")
+                            
                             # Use numpy's allclose for numeric comparison with tolerance
-                            if not np.allclose(agent_df[col].fillna(0).values, 
-                                              ground_truth_df[col].fillna(0).values, 
-                                              rtol=1e-5, atol=1e-8, equal_nan=True):
+                            comparison_result = np.allclose(
+                                agent_df[col].fillna(0).values, 
+                                ground_truth_df[col].fillna(0).values, 
+                                rtol=1e-5, atol=1e-8, equal_nan=True
+                            )
+                            
+                            if not comparison_result:
                                 columns_match = False
                                 column_differences[col] = {'message': 'Values do not match within tolerance'}
-                                debug_print(f"Column {col} values don't match")
+                                direct_log(f"FAIL: Column {col} numeric values don't match within tolerance")
+                                
+                                # Log statistics to help identify the issue
+                                agent_stats = {
+                                    'mean': float(agent_df[col].mean()),
+                                    'min': float(agent_df[col].min()),
+                                    'max': float(agent_df[col].max()),
+                                    'null_count': int(agent_df[col].isna().sum())
+                                }
+                                gt_stats = {
+                                    'mean': float(ground_truth_df[col].mean()),
+                                    'min': float(ground_truth_df[col].min()),
+                                    'max': float(ground_truth_df[col].max()),
+                                    'null_count': int(ground_truth_df[col].isna().sum())
+                                }
+                                direct_log(f"Column {col} stats - Agent: {agent_stats}, Ground Truth: {gt_stats}")
+                            else:
+                                direct_log(f"PASS: Column {col} values match within tolerance")
                         except Exception as e:
                             # Fallback to equals if allclose fails
+                            direct_log(f"ERROR in numeric comparison for {col}: {str(e)}")
                             if not agent_df[col].equals(ground_truth_df[col]):
                                 columns_match = False
                                 column_differences[col] = {'message': f'Values do not match: {str(e)}'}
-                                debug_print(f"Column {col} equals check failed: {str(e)}")
+                                direct_log(f"FAIL: Column {col} equals check failed: {str(e)}")
                     
                     # For non-numeric columns, use exact comparison
                     else:
-                        if not agent_df[col].equals(ground_truth_df[col]):
+                        equal_result = agent_df[col].equals(ground_truth_df[col])
+                        if not equal_result:
                             columns_match = False
                             column_differences[col] = {'message': 'Values do not match'}
-                            debug_print(f"Column {col} (non-numeric) values don't match")
+                            direct_log(f"FAIL: Column {col} (non-numeric) values don't match")
+                            
+                            # Find the first few differences
+                            try:
+                                diff_mask = agent_df[col] != ground_truth_df[col]
+                                diff_count = diff_mask.sum()
+                                direct_log(f"Number of different values: {diff_count} out of {len(agent_df)}")
+                                
+                                diff_indices = diff_mask[diff_mask].index.tolist()[:3]
+                                if diff_indices:
+                                    for idx in diff_indices:
+                                        agent_val = str(agent_df.loc[idx, col])
+                                        gt_val = str(ground_truth_df.loc[idx, col])
+                                        direct_log(f"Row {idx}: Agent='{agent_val}', GT='{gt_val}'")
+                            except Exception as e:
+                                direct_log(f"Error finding differences: {str(e)}")
+                        else:
+                            direct_log(f"PASS: Column {col} values match exactly")
                 
                 if columns_match:
                     successful_stages += 1
@@ -186,21 +306,24 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                         'success': True,
                         'details': {}
                     }
-                    logger.info(f"Stage {stage_id} ({stage_name}): ✓ Columns match")
+                    direct_log(f"SUCCESS: Stage {stage_id} ({stage_name}) - All columns match")
+                    details.append(f"Stage {stage_id} ({stage_name}): ✓ Columns match")
                 else:
                     stage_results[stage_id] = {
                         'name': stage_name,
                         'success': False,
                         'details': {'differences': column_differences}
                     }
-                    logger.info(f"Stage {stage_id} ({stage_name}): ✗ Column values don't match")
+                    direct_log(f"FAILURE: Stage {stage_id} ({stage_name}) - Columns with differences: {list(column_differences.keys())}")
+                    details.append(f"Stage {stage_id} ({stage_name}): ✗ Column values don't match")
             
             # Calculate final score
             score_value = successful_stages / total_stages if total_stages > 0 else 0.0
             success_percentage = score_value * 100
             
             explanation = f"Pipeline validation: {successful_stages}/{total_stages} stages correct ({success_percentage:.1f}%)"
-            debug_print(explanation)
+            direct_log(f"===== VALIDATION COMPLETE =====")
+            direct_log(explanation)
             
             return Score(
                 value=score_value,
@@ -211,19 +334,22 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                     "stage_results": stage_results,
                     "successful_stages": successful_stages,
                     "total_stages": total_stages,
-                    "success_percentage": success_percentage
+                    "success_percentage": success_percentage,
+                    "validator_log_file": VALIDATOR_LOG_FILE
                 }
             )
             
         except Exception as e:
-            logger.info(f"Validation error: {str(e)}")
-            debug_print(f"Error during validation: {str(e)}")
+            error_traceback = traceback.format_exc()
+            direct_log(f"CRITICAL ERROR: {str(e)}")
+            direct_log(f"Traceback: {error_traceback}")
             
+            details.append(f"Validation error: {str(e)}")
             return Score(
                 value=0.0,
                 explanation=f"Error during validation: {str(e)}",
                 answer=answer[:100] + "..." if len(answer) > 100 else answer,
-                metadata={"details": details, "error": str(e)}
+                metadata={"details": details, "error": str(e), "traceback": error_traceback, "validator_log_file": VALIDATOR_LOG_FILE}
             )
 
     return score

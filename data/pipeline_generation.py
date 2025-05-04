@@ -32,39 +32,6 @@ class PipelineGenerator:
         self.operations = OPERATIONS
         self.pipeline_spec = {}
         
-        # Define column mappings for default parameters
-        self.column_mappings = {
-            "column_1": "column_1",
-            "column_2": "column_2",
-            "column_3": "column_3",
-            "column_4": "column_4",
-            "column_5": "column_5",
-            "column_6": "column_6",
-            "column_7": "column_7",
-            "column_8": "column_8",
-            "fruits": "fruits",
-            "cities": "cities",
-            "date": "date"
-        }
-        
-    def _fix_column_references(self, params: Dict) -> Dict:
-        """Convert column references to actual column names"""
-        fixed_params = params.copy()
-        
-        # Fix column parameter
-        if "columns" in fixed_params and not isinstance(fixed_params["columns"], list):
-            col_ref = str(fixed_params["columns"])
-            if col_ref in self.column_mappings:
-                fixed_params["columns"] = [self.column_mappings[col_ref]]
-        
-        # Fix single column parameter
-        if "column" in fixed_params and not isinstance(fixed_params["column"], str):
-            col_ref = str(fixed_params["column"])
-            if col_ref in self.column_mappings:
-                fixed_params["column"] = self.column_mappings[col_ref]
-                
-        return fixed_params
-        
     def generate_pipeline(self, data_path: str) -> Dict:
         """Generate a deterministic data processing pipeline using the first n operations"""
         # Generate pipeline stages
@@ -91,9 +58,8 @@ class PipelineGenerator:
             op_name = op_names[i]
             op_config = self.operations[op_name]
             
-            # Get default parameters and fix column references
+            # Use default parameters directly from stages.py
             params = op_config.get("default_params", {}).copy()
-            params = self._fix_column_references(params)
             
             pipeline["stages"].append({
                 "id": f"stage_{i+1}",
@@ -132,7 +98,7 @@ if __name__ == "__main__":
     # Generate pipeline
     pipeline_generator = PipelineGenerator(n_preprocessing_steps=10)
     pipeline = pipeline_generator.generate_pipeline("./data/input_data.csv")
-    pipeline_generator.save_pipeline_spec("./data/pipeline_spec_10.json")
+    pipeline_generator.save_pipeline_spec("./data/pipeline_spec_11.json")
     
     # Print generated pipeline for verification
     print("Pipeline generated and saved to pipeline_spec.json")

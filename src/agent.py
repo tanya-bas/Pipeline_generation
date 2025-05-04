@@ -5,6 +5,7 @@ from inspect_ai import Task, task, eval
 from inspect_ai.solver import basic_agent, Solver
 from inspect_ai.dataset import Sample
 from inspect_ai.tool import bash, python
+from inspect_ai.scorer import Score, accuracy, stderr, scorer
 import logging
 import sys
 
@@ -32,6 +33,102 @@ def default_solver() -> Solver:
         submit_description="Finished",
     )
 
+# Debug function to log what checks are passing/failing
+def debug_print(message):
+    print(f"DEBUG: {message}")
+    logger.info(f"DEBUG: {message}")
+
+# Simple custom scorer with required metrics parameter
+@scorer(metrics=[accuracy(), stderr()])
+def simple_pipeline_scorer():
+    """
+    A simple scorer that checks for basic elements in the agent's code.
+    """
+    async def score(state, target):
+        answer = state.output.completion
+        score_value = 0.0
+        details = []
+        
+        # Check for dataframe usage (check for common variable names: df, data, dataframe)
+        dataframe_vars = ["df", "data", "dataframe"]
+        has_dataframe = any(var in answer for var in dataframe_vars)
+        if has_dataframe:
+            score_value += 0.2
+            details.append(f"✓ Uses dataframe variable")
+            debug_print(f"Dataframe check passed. Found one of: {dataframe_vars}")
+        else:
+            details.append("✗ No dataframe variable usage found")
+            debug_print("Dataframe check failed")
+        
+        # Check for pandas import
+        pandas_imports = ["import pandas", "from pandas import"]
+        has_pandas = any(imp in answer for imp in pandas_imports)
+        if has_pandas:
+            score_value += 0.2
+            details.append("✓ Imports pandas")
+            debug_print("Pandas import check passed")
+        else:
+            details.append("✗ No pandas import found")
+            debug_print("Pandas import check failed")
+        
+        # Check for data operation keywords
+        operation_keywords = ["fillna", "fill_na", "fill", "replace", "na", "missing", "ffill", "bfill", "interpolate"]
+        found_operations = [kw for kw in operation_keywords if kw.lower() in answer.lower()]
+        if found_operations:
+            score_value += 0.2
+            details.append(f"✓ Uses data operations: {', '.join(found_operations)}")
+            debug_print(f"Operations check passed. Found: {found_operations}")
+        else:
+            details.append("✗ No data operation functions found")
+            debug_print("Operations check failed")
+        
+        # Check for CSV save operation
+        csv_save_patterns = [".to_csv", "save_csv", "write_csv", "save", "to_csv"]
+        has_csv_save = any(pattern in answer for pattern in csv_save_patterns)
+        if has_csv_save:
+            score_value += 0.2
+            details.append("✓ Saves results to CSV")
+            debug_print("CSV save check passed")
+        else:
+            details.append("✗ No CSV save operation found")
+            debug_print("CSV save check failed")
+        
+        # Check for task completion
+        if "Finished" in answer:
+            score_value += 0.2
+            details.append("✓ Task completed")
+            debug_print("Task completion check passed")
+        else:
+            details.append("✗ Task not marked as completed")
+            debug_print("Task completion check failed")
+        
+        explanation = "Simple pipeline validation: " + " | ".join(details)
+        
+        # Add detailed metadata for debugging
+        metadata = {
+            "details": details,
+            "code_snippet": answer[:500] + "..." if len(answer) > 500 else answer,
+            "checks": {
+                "dataframe_usage": has_dataframe,
+                "pandas_import": has_pandas,
+                "operation_usage": len(found_operations) > 0,
+                "csv_save": has_csv_save,
+                "task_completed": "Finished" in answer
+            }
+        }
+        
+        debug_print(f"Final score: {score_value}")
+        debug_print(f"Check results: {metadata['checks']}")
+        
+        return Score(
+            value=score_value,
+            explanation=explanation,
+            answer=answer[:100] + "..." if len(answer) > 100 else answer,
+            metadata=metadata
+        )
+
+    return score
+
 @task
 def process_complete_pipeline(stage_op):
     """Process the complete 3-stage pipeline using Inspect AI."""
@@ -45,7 +142,7 @@ def process_complete_pipeline(stage_op):
     IMPORTANT: Execute ALL of the following steps in a SINGLE Python code block:
     1. Import all necessary libraries
     2. Load the data from: {pipeline_spec['stages'][0]['operation']['parameters']['input_filepath']}
-    3. Perfrom the following operation(s): {stage_op['name']}, here is the description: {stage_op['description']} and here is the column to perfrom it on: {stage_op['parameters']['columns']}
+    3. Perfrom the following operation(s): {stage_op['name']}, which requires you to {stage_op['description']} on the following column: {stage_op['parameters']['columns']}
     4. Save the processed data to: {pipeline_spec['stages'][0]['operation']['parameters']['output_filepath']}
     
     Do NOT split your code into multiple separate executions. Write ONE complete script that performs all steps.
@@ -53,6 +150,10 @@ def process_complete_pipeline(stage_op):
     
     After saving the file successfully, output the string "Finished".
     """
+    
+    print("PROMPT:")
+    print(prompt)
+    print("=" * 50)
 
     logger.info(f"Input folder: {pipeline_spec['stages'][0]['operation']['parameters']['input_filepath']}")
     logger.info(f"Output folder: {pipeline_spec['stages'][0]['operation']['parameters']['output_filepath']}")
@@ -72,7 +173,55 @@ def process_complete_pipeline(stage_op):
         """
     )
     
-    return Task(dataset=[sample], solver=agent, sandbox="docker")
+    return Task(
+        dataset=[sample], 
+        solver=agent, 
+        sandbox="docker", 
+        scorer=simple_pipeline_scorer()
+    )
+
+def display_detailed_results(results):
+    """Display detailed results from the evaluation"""
+    print("\n" + "="*50)
+    print("DETAILED PIPELINE EVALUATION RESULTS")
+    print("="*50)
+    
+    # Check if results has the expected structure
+    if not hasattr(results, 'samples') or not results.samples:
+        print("No sample results available.")
+        return
+    
+    # Display metrics
+    if hasattr(results, 'metrics') and results.metrics:
+        print("\nMETRICS:")
+        for metric_name, metric_value in results.metrics.items():
+            print(f"  {metric_name}: {metric_value}")
+    
+    # Display sample details
+    print("\nSAMPLE DETAILS:")
+    for i, sample in enumerate(results.samples):
+        print(f"\nSample {i+1}:")
+        
+        # Display sample score
+        if hasattr(sample, 'score'):
+            print(f"  Score: {sample.score.value}")
+            print(f"  Explanation: {sample.score.explanation}")
+            
+            # Display metadata if available
+            if hasattr(sample.score, 'metadata') and sample.score.metadata:
+                print("\n  Detailed checks:")
+                
+                # Display check results
+                if 'checks' in sample.score.metadata:
+                    for check_name, check_result in sample.score.metadata['checks'].items():
+                        status = "✓" if check_result else "✗"
+                        print(f"    {status} {check_name}")
+        
+        # Display sample output
+        if hasattr(sample, 'output') and hasattr(sample.output, 'completion'):
+            print(f"\n  Code snippet: {sample.output.completion[:300]}...")
+    
+    print("\n" + "="*50)
 
 if __name__ == "__main__":
     pipeline_spec = json.load(open("./data/pipeline_spec1.json"))
@@ -80,7 +229,45 @@ if __name__ == "__main__":
 
     dataframe_path = "./data/input_data.csv"
     
-    results = eval(process_complete_pipeline(stage_op), model="openai/gpt-4o")
+    # Run the task with our scorer
+    print("Running pipeline evaluation...")
+    results = eval(
+        process_complete_pipeline(stage_op), 
+        model="openai/gpt-4o"
+    )
     
-    # The agent will have executed the code and shown the results in its response
-    print("Complete pipeline processing complete.")
+    # Save detailed results to file for inspection
+    try:
+        with open('pipeline_results.json', 'w') as f:
+            # Convert results to dict for JSON serialization
+            results_dict = {
+                'metrics': results.metrics if hasattr(results, 'metrics') else {},
+                'samples': []
+            }
+            
+            # Extract sample data
+            if hasattr(results, 'samples'):
+                for sample in results.samples:
+                    sample_dict = {}
+                    
+                    if hasattr(sample, 'score'):
+                        sample_dict['score'] = {
+                            'value': sample.score.value,
+                            'explanation': sample.score.explanation
+                        }
+                        
+                        if hasattr(sample.score, 'metadata'):
+                            sample_dict['score']['metadata'] = sample.score.metadata
+                    
+                    if hasattr(sample, 'output') and hasattr(sample.output, 'completion'):
+                        sample_dict['code'] = sample.output.completion
+                    
+                    results_dict['samples'].append(sample_dict)
+            
+            json.dump(results_dict, f, indent=2)
+        print("Detailed results saved to pipeline_results.json")
+    except Exception as e:
+        print(f"Error saving results: {e}")
+    
+    # Display detailed results
+    display_detailed_results(results)

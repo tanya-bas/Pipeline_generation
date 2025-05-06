@@ -6,10 +6,12 @@ from inspect_ai.solver import basic_agent, Solver
 from inspect_ai.dataset import Sample
 from inspect_ai.tool import bash, python
 from inspect_ai.scorer import Score, accuracy, stderr, scorer
+from inspect_ai.util import sandbox
 import logging
 import sys
 import pandas as pd
 import numpy as np
+import io
 from pathlib import Path
 import time
 import traceback
@@ -102,9 +104,11 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
         # Current directory info for debugging
         cwd = os.getcwd()
         direct_log(f"Current working directory: {cwd}")
-        ls_output = os.listdir('.')
-        direct_log(f"Files in current directory: {', '.join(ls_output[:5])}" + 
-                  (f"... and {len(ls_output)-5} more" if len(ls_output) > 5 else ""))
+        
+        # List sandbox directory contents using sandbox().exec
+        direct_log("Listing sandbox directory contents...")
+        sandbox_ls_result = await sandbox().exec(cmd=["ls", "-la"])
+        direct_log(f"Sandbox directory contents: {sandbox_ls_result.stdout}")
         
         # Try to extract the dataframe from CSV markers in agent answer
         agent_df = None
@@ -116,7 +120,6 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                 direct_log(f"CSV content preview: {csv_content[:200]}...")
                 
                 # Parse the CSV content into a dataframe
-                import io
                 agent_df = pd.read_csv(io.StringIO(csv_content))
                 direct_log(f"Successfully created dataframe from CSV markers: {agent_df.shape}")
                 direct_log(f"Columns: {list(agent_df.columns)}")
@@ -126,35 +129,45 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
         else:
             direct_log("CSV markers not found in agent's answer")
         
-        # If we couldn't extract a dataframe from CSV markers, try file-based approach
+        # If we couldn't extract a dataframe from CSV markers, try to get it from the sandbox
         if agent_df is None:
-            direct_log("Could not extract dataframe from answer, trying file-based approach...")
+            direct_log("Could not extract dataframe from answer, trying to get file from sandbox...")
             
-            # Try multiple potential file paths for the output file
+            # Potential paths to try within the sandbox
             potential_paths = [
-                output_filepath,                               # As specified
-                os.path.abspath(output_filepath),              # Absolute path
-                os.path.join(cwd, output_filepath),            # Relative to cwd
-                f"./data/{output_filepath}",                   # In data folder
-                f"/tmp/{output_filepath}",                     # In tmp folder
-                f"/mnt/data/{output_filepath}"                 # Docker common mount point
+                output_filepath,                 # As specified
+                f"./{output_filepath}",          # With explicit relative path
+                f"/tmp/{output_filepath}",       # In tmp
+                f"data/{output_filepath}",       # In data subfolder
+                os.path.basename(output_filepath) # Just the filename
             ]
             
-            # Check if output file exists
+            # Try each potential path in the sandbox
             output_found = False
             for path in potential_paths:
-                if os.path.exists(path):
-                    output_filepath = path
-                    direct_log(f"FOUND OUTPUT FILE: {path}")
-                    output_found = True
-                    break
-                    
-            if not output_found:
-                direct_log("OUTPUT FILE NOT FOUND in any of these locations:")
-                for path in potential_paths:
-                    direct_log(f"  - {path} : {'EXISTS' if os.path.exists(path) else 'NOT FOUND'}")
+                direct_log(f"Trying to access {path} in sandbox...")
+                cat_result = await sandbox().exec(cmd=["cat", path])
                 
-                # Try to extract a dataframe from the printed output
+                if cat_result.returncode == 0:
+                    direct_log(f"FOUND OUTPUT FILE in sandbox at: {path}")
+                    
+                    try:
+                        # Create dataframe from the file content
+                        agent_df = pd.read_csv(io.StringIO(cat_result.stdout))
+                        direct_log(f"Successfully loaded dataframe from sandbox file: {agent_df.shape}")
+                        direct_log(f"Columns: {list(agent_df.columns)}")
+                        output_found = True
+                        break
+                    except Exception as e:
+                        direct_log(f"Error parsing file content from sandbox: {str(e)}")
+                        direct_log(traceback.format_exc())
+                else:
+                    direct_log(f"File not found at {path} in sandbox")
+            
+            if not output_found:
+                direct_log("OUTPUT FILE NOT FOUND in sandbox in any of the tried locations")
+                
+                # Try to extract a dataframe from the printed output as last resort
                 try:
                     if "df.head()" in answer:
                         direct_log("Attempting to extract dataframe from df.head() output...")
@@ -194,32 +207,16 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                     direct_log(traceback.format_exc())
                 
                 if agent_df is None:
-                    details.append(f"Output file not found: {output_filepath}")
+                    details.append(f"Output file not found in sandbox: {output_filepath}")
                     return Score(
                         value=score_value,
-                        explanation="Output file not found and couldn't extract dataframe from output",
-                        answer=answer[:100] + "..." if len(answer) > 100 else answer,
-                        metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
-                    )
-            
-            # If file was found but we don't have a dataframe yet, load it
-            if agent_df is None and output_found:
-                try:
-                    direct_log(f"Loading agent dataframe from: {output_filepath}")
-                    agent_df = pd.read_csv(output_filepath)
-                    direct_log(f"Agent dataframe loaded: {agent_df.shape}, first few columns: {list(agent_df.columns)[:3]}")
-                except Exception as e:
-                    direct_log(f"Error loading agent dataframe from file: {str(e)}")
-                    details.append(f"Error loading output file: {str(e)}")
-                    return Score(
-                        value=score_value,
-                        explanation=f"Error loading output file: {str(e)}",
+                        explanation="Output file not found in sandbox and couldn't extract dataframe from output",
                         answer=answer[:100] + "..." if len(answer) > 100 else answer,
                         metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
                     )
         
         try:
-            # Load ground truth dataframe
+            # Load ground truth dataframe (from host file system, not sandbox)
             direct_log(f"Loading ground truth dataframe from: {ground_truth_path}")
             ground_truth_df = pd.read_csv(ground_truth_path)
             direct_log(f"Ground truth dataframe loaded: {ground_truth_df.shape}, first few columns: {list(ground_truth_df.columns)[:3]}")

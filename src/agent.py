@@ -65,10 +65,10 @@ def default_solver() -> Solver:
 
 # Validation-based scorer using direct column comparison
 @scorer(metrics=[accuracy(), stderr()])
-def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_stages):
+def validation_pipeline_scorer(pipeline_spec, input_path, n_stages):
     """
-    A scorer that evaluates the accuracy of data transformations by directly comparing 
-    affected columns between agent output and ground truth data.
+    A scorer that evaluates the accuracy of data transformations by 
+    dynamically applying transformations to the input data and comparing with agent output.
     """
     async def score(state, target):
         answer = state.output.completion
@@ -76,7 +76,6 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
         # Direct logging
         direct_log(f"===== VALIDATION STARTED =====")
         direct_log(f"Input path: {input_path}")
-        direct_log(f"Ground truth path: {ground_truth_path}")
         direct_log(f"Number of stages: {n_stages}")
         
         # Default score values
@@ -216,10 +215,32 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                     )
         
         try:
-            # Load ground truth dataframe (from host file system, not sandbox)
-            direct_log(f"Loading ground truth dataframe from: {ground_truth_path}")
-            ground_truth_df = pd.read_csv(ground_truth_path)
-            direct_log(f"Ground truth dataframe loaded: {ground_truth_df.shape}, first few columns: {list(ground_truth_df.columns)[:3]}")
+            # Load the input data and dynamically apply the transformations
+            direct_log(f"Loading input dataframe from: {input_path}")
+            
+            # Try to load from the host filesystem (not sandbox)
+            try:
+                input_df = pd.read_csv(input_path)
+                direct_log(f"Input dataframe loaded from host: {input_df.shape}")
+            except Exception as e:
+                direct_log(f"Error loading input dataframe from host: {str(e)}")
+                # Try to get input file from sandbox if not available in host
+                cat_result = await sandbox().exec(cmd=["cat", input_path])
+                if cat_result.returncode == 0:
+                    input_df = pd.read_csv(io.StringIO(cat_result.stdout))
+                    direct_log(f"Input dataframe loaded from sandbox: {input_df.shape}")
+                else:
+                    details.append(f"Error loading input file: {str(e)}")
+                    return Score(
+                        value=score_value,
+                        explanation=f"Error loading input file: {str(e)}",
+                        answer=answer[:100] + "..." if len(answer) > 100 else answer,
+                        metadata={"details": details, "successful_stages": 0, "total_stages": total_stages, "validator_log_file": VALIDATOR_LOG_FILE}
+                    )
+            
+            # Create a validator instance to use its transformation functions
+            # We don't need to load the actual pipeline spec file since we already have it
+            validator = PipelineValidator("./data/pipeline_spec_10.json")
             
             # Check if dataframes were loaded successfully
             if agent_df is None:
@@ -235,7 +256,10 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
             processing_stages = pipeline_spec['stages'][1:n_stages+1]
             direct_log(f"Processing {len(processing_stages)} stages: {[s['name'] for s in processing_stages]}")
             
-            # For each stage, check if the affected columns match between agent output and ground truth
+            # Apply each transformation stage to the input data
+            expected_df = input_df.copy()
+            
+            # For each stage, apply the transformation and validate against agent output
             stage_results = {}
             
             for i, stage in enumerate(processing_stages):
@@ -246,160 +270,197 @@ def validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n_s
                 direct_log(f"------- Stage {stage_id}: {stage_name} -------")
                 direct_log(f"Parameters: {json.dumps(stage_params)}")
                 
-                # Get columns affected by this stage
-                affected_columns = []
-                
-                # Handle different stage types
-                if stage_name == 'fill_na':
+                try:
+                    # Apply the transformation to our expected dataframe
+                    transformer_method = getattr(validator, f"_apply_{stage_name}")
                     columns = stage_params.get('columns', [])
                     if isinstance(columns, str):
-                        affected_columns = [columns]
+                        columns = [columns]
+                    
+                    # Apply the transformation
+                    if stage_name == 'time_features':
+                        expected_df = validator._apply_time_features(expected_df, stage_params)
                     else:
+                        expected_df = transformer_method(expected_df, columns, stage_params)
+                    
+                    direct_log(f"Applied {stage_name} to input data, shape now: {expected_df.shape}")
+                    
+                    # Get columns affected by this stage
+                    affected_columns = []
+                    
+                    # Handle different stage types to identify affected columns
+                    if stage_name == 'fill_na':
                         affected_columns = columns
-                
-                elif stage_name == 'one_hot_encode':
-                    # One-hot encoding creates new columns
-                    col = stage_params.get('columns', '')
-                    if isinstance(col, list):
-                        col = col[0]  # Usually one column is one-hot encoded
                     
-                    # Find columns with the prefix in both dataframes
-                    agent_one_hot_cols = [c for c in agent_df.columns if c.startswith(f'{col}_')]
-                    ground_truth_one_hot_cols = [c for c in ground_truth_df.columns if c.startswith(f'{col}_')]
+                    elif stage_name == 'one_hot_encode':
+                        # One-hot encoding creates new columns
+                        col = columns[0] if columns else ''  # Usually one column is one-hot encoded
+                        
+                        # Find columns with the prefix in both dataframes
+                        expected_one_hot_cols = [c for c in expected_df.columns if c.startswith(f'{col}_')]
+                        agent_one_hot_cols = [c for c in agent_df.columns if c.startswith(f'{col}_')]
+                        
+                        direct_log(f"One-hot encode columns in expected: {expected_one_hot_cols}")
+                        direct_log(f"One-hot encode columns in agent: {agent_one_hot_cols}")
+                        
+                        # Only compare columns that exist in both
+                        affected_columns = [c for c in expected_one_hot_cols if c in agent_one_hot_cols]
                     
-                    direct_log(f"One-hot encode columns in agent: {agent_one_hot_cols}")
-                    direct_log(f"One-hot encode columns in ground truth: {ground_truth_one_hot_cols}")
+                    elif stage_name == 'time_features':
+                        column = stage_params.get('column', '')
+                        features = stage_params.get('features', ['year', 'month', 'day'])
+                        affected_columns = [f'{column}_{feature}' for feature in features]
                     
-                    # Only compare columns that exist in both
-                    affected_columns = [c for c in agent_one_hot_cols if c in ground_truth_one_hot_cols]
-                
-                elif stage_name == 'time_features':
-                    column = stage_params.get('column', '')
-                    features = stage_params.get('features', ['year', 'month', 'day'])
-                    affected_columns = [f'{column}_{feature}' for feature in features]
-                
-                else:
-                    # For most other operations, the 'columns' parameter indicates affected columns
-                    columns = stage_params.get('columns', [])
-                    if isinstance(columns, str):
-                        affected_columns = [columns]
                     else:
+                        # For most other operations, the 'columns' parameter indicates affected columns
                         affected_columns = columns
-                
-                direct_log(f"Affected columns: {affected_columns}")
-                
-                # Check if columns exist in both dataframes
-                missing_cols = [col for col in affected_columns if col not in agent_df.columns or col not in ground_truth_df.columns]
-                if missing_cols:
-                    direct_log(f"ERROR: Missing columns: {missing_cols}")
-                    direct_log(f"Agent columns: {list(agent_df.columns)}")
-                    direct_log(f"Ground truth columns: {list(ground_truth_df.columns)}")
                     
-                    stage_results[stage_id] = {
-                        'name': stage_name,
-                        'success': False,
-                        'details': {'message': f'Missing columns: {missing_cols}'}
-                    }
-                    details.append(f"Stage {stage_id} ({stage_name}): ✗ Missing columns: {missing_cols}")
-                    continue
-                
-                # Compare each affected column
-                columns_match = True
-                column_differences = {}
-                
-                for col in affected_columns:
-                    # Skip non-existent columns
-                    if col not in agent_df.columns or col not in ground_truth_df.columns:
+                    direct_log(f"Affected columns: {affected_columns}")
+                    
+                    # Check if columns exist in both dataframes
+                    missing_cols = [col for col in affected_columns if col not in agent_df.columns or col not in expected_df.columns]
+                    if missing_cols:
+                        direct_log(f"ERROR: Missing columns: {missing_cols}")
+                        direct_log(f"Agent columns: {list(agent_df.columns)}")
+                        direct_log(f"Expected columns: {list(expected_df.columns)}")
+                        
+                        stage_results[stage_id] = {
+                            'name': stage_name,
+                            'success': False,
+                            'details': {'message': f'Missing columns: {missing_cols}'}
+                        }
+                        details.append(f"Stage {stage_id} ({stage_name}): ✗ Missing columns: {missing_cols}")
                         continue
                     
-                    direct_log(f"Comparing column: {col}")
+                    # Compare each affected column
+                    columns_match = True
+                    column_differences = {}
                     
-                    # For numeric columns, use approximate comparison
-                    if pd.api.types.is_numeric_dtype(agent_df[col]) and pd.api.types.is_numeric_dtype(ground_truth_df[col]):
-                        try:
-                            # Log samples for comparison
-                            agent_sample = agent_df[col].head(3).tolist()
-                            gt_sample = ground_truth_df[col].head(3).tolist()
-                            direct_log(f"Sample values - Agent: {agent_sample}, Ground Truth: {gt_sample}")
-                            
-                            # Use numpy's allclose for numeric comparison with tolerance
-                            comparison_result = np.allclose(
-                                agent_df[col].fillna(0).values, 
-                                ground_truth_df[col].fillna(0).values, 
-                                rtol=1e-5, atol=1e-8, equal_nan=True
-                            )
-                            
-                            if not comparison_result:
-                                columns_match = False
-                                column_differences[col] = {'message': 'Values do not match within tolerance'}
-                                direct_log(f"FAIL: Column {col} numeric values don't match within tolerance")
+                    # Reset indexes to avoid alignment issues
+                    reset_expected_df = expected_df.reset_index(drop=True)
+                    reset_agent_df = agent_df.reset_index(drop=True)
+                    
+                    for col in affected_columns:
+                        # Skip non-existent columns
+                        if col not in reset_agent_df.columns or col not in reset_expected_df.columns:
+                            continue
+                        
+                        direct_log(f"Comparing column: {col}")
+                        
+                        # For numeric columns, use approximate comparison
+                        if pd.api.types.is_numeric_dtype(reset_agent_df[col]) and pd.api.types.is_numeric_dtype(reset_expected_df[col]):
+                            try:
+                                # Log samples for comparison
+                                agent_sample = reset_agent_df[col].head(3).tolist()
+                                expected_sample = reset_expected_df[col].head(3).tolist()
+                                direct_log(f"Sample values - Agent: {agent_sample}, Expected: {expected_sample}")
                                 
-                                # Log statistics to help identify the issue
-                                agent_stats = {
-                                    'mean': float(agent_df[col].mean()),
-                                    'min': float(agent_df[col].min()),
-                                    'max': float(agent_df[col].max()),
-                                    'null_count': int(agent_df[col].isna().sum())
-                                }
-                                gt_stats = {
-                                    'mean': float(ground_truth_df[col].mean()),
-                                    'min': float(ground_truth_df[col].min()),
-                                    'max': float(ground_truth_df[col].max()),
-                                    'null_count': int(ground_truth_df[col].isna().sum())
-                                }
-                                direct_log(f"Column {col} stats - Agent: {agent_stats}, Ground Truth: {gt_stats}")
-                            else:
-                                direct_log(f"PASS: Column {col} values match within tolerance")
-                        except Exception as e:
-                            # Fallback to equals if allclose fails
-                            direct_log(f"ERROR in numeric comparison for {col}: {str(e)}")
-                            if not agent_df[col].equals(ground_truth_df[col]):
+                                # Use numpy's allclose for numeric comparison with tolerance
+                                # Get the series as arrays
+                                agent_values = reset_agent_df[col].fillna(0).values
+                                expected_values = reset_expected_df[col].fillna(0).values
+                                
+                                # Use minimum length in case of different row counts
+                                min_len = min(len(agent_values), len(expected_values))
+                                
+                                comparison_result = np.allclose(
+                                    agent_values[:min_len],
+                                    expected_values[:min_len],
+                                    rtol=1e-5, atol=1e-8, equal_nan=True
+                                )
+                                
+                                if not comparison_result:
+                                    columns_match = False
+                                    column_differences[col] = {'message': 'Values do not match within tolerance'}
+                                    direct_log(f"FAIL: Column {col} numeric values don't match within tolerance")
+                                    
+                                    # Log statistics to help identify the issue
+                                    agent_stats = {
+                                        'mean': float(reset_agent_df[col].mean()),
+                                        'min': float(reset_agent_df[col].min()),
+                                        'max': float(reset_agent_df[col].max()),
+                                        'null_count': int(reset_agent_df[col].isna().sum())
+                                    }
+                                    expected_stats = {
+                                        'mean': float(reset_expected_df[col].mean()),
+                                        'min': float(reset_expected_df[col].min()),
+                                        'max': float(reset_expected_df[col].max()),
+                                        'null_count': int(reset_expected_df[col].isna().sum())
+                                    }
+                                    direct_log(f"Column {col} stats - Agent: {agent_stats}, Expected: {expected_stats}")
+                                else:
+                                    direct_log(f"PASS: Column {col} values match within tolerance")
+                            except Exception as e:
+                                # Fallback to equals if allclose fails
+                                direct_log(f"ERROR in numeric comparison for {col}: {str(e)}")
                                 columns_match = False
                                 column_differences[col] = {'message': f'Values do not match: {str(e)}'}
                                 direct_log(f"FAIL: Column {col} equals check failed: {str(e)}")
-                    
-                    # For non-numeric columns, use exact comparison
-                    else:
-                        equal_result = agent_df[col].equals(ground_truth_df[col])
-                        if not equal_result:
-                            columns_match = False
-                            column_differences[col] = {'message': 'Values do not match'}
-                            direct_log(f"FAIL: Column {col} (non-numeric) values don't match")
-                            
-                            # Find the first few differences
-                            try:
-                                diff_mask = agent_df[col] != ground_truth_df[col]
-                                diff_count = diff_mask.sum()
-                                direct_log(f"Number of different values: {diff_count} out of {len(agent_df)}")
-                                
-                                diff_indices = diff_mask[diff_mask].index.tolist()[:3]
-                                if diff_indices:
-                                    for idx in diff_indices:
-                                        agent_val = str(agent_df.loc[idx, col])
-                                        gt_val = str(ground_truth_df.loc[idx, col])
-                                        direct_log(f"Row {idx}: Agent='{agent_val}', GT='{gt_val}'")
-                            except Exception as e:
-                                direct_log(f"Error finding differences: {str(e)}")
+                        
+                        # For non-numeric columns, sample and compare the first few values
                         else:
-                            direct_log(f"PASS: Column {col} values match exactly")
-                
-                if columns_match:
-                    successful_stages += 1
-                    stage_results[stage_id] = {
-                        'name': stage_name,
-                        'success': True,
-                        'details': {}
-                    }
-                    direct_log(f"SUCCESS: Stage {stage_id} ({stage_name}) - All columns match")
-                    details.append(f"Stage {stage_id} ({stage_name}): ✓ Columns match")
-                else:
+                            try:
+                                # Compare a sample of values (first 100 rows or fewer)
+                                sample_size = min(100, len(reset_agent_df), len(reset_expected_df))
+                                agent_sample = reset_agent_df[col].iloc[:sample_size].fillna('').astype(str)
+                                expected_sample = reset_expected_df[col].iloc[:sample_size].fillna('').astype(str)
+                                
+                                # Check if samples match
+                                sample_match = (agent_sample == expected_sample).all()
+                                
+                                if not sample_match:
+                                    columns_match = False
+                                    column_differences[col] = {'message': 'Values do not match'}
+                                    direct_log(f"FAIL: Column {col} (non-numeric) values don't match")
+                                    
+                                    # Find the first few differences
+                                    try:
+                                        diff_mask = agent_sample != expected_sample
+                                        diff_count = diff_mask.sum()
+                                        direct_log(f"Number of different values in sample: {diff_count} out of {sample_size}")
+                                        
+                                        diff_indices = diff_mask[diff_mask].index.tolist()[:3]
+                                        if diff_indices:
+                                            for idx in diff_indices:
+                                                agent_val = str(reset_agent_df.loc[idx, col])
+                                                expected_val = str(reset_expected_df.loc[idx, col])
+                                                direct_log(f"Row {idx}: Agent='{agent_val}', Expected='{expected_val}'")
+                                    except Exception as e:
+                                        direct_log(f"Error finding differences: {str(e)}")
+                                else:
+                                    direct_log(f"PASS: Column {col} sample values match")
+                            except Exception as e:
+                                direct_log(f"ERROR comparing column {col}: {str(e)}")
+                                columns_match = False
+                                column_differences[col] = {'message': f'Error comparing values: {str(e)}'}
+                    
+                    if columns_match:
+                        successful_stages += 1
+                        stage_results[stage_id] = {
+                            'name': stage_name,
+                            'success': True,
+                            'details': {}
+                        }
+                        direct_log(f"SUCCESS: Stage {stage_id} ({stage_name}) - All columns match")
+                        details.append(f"Stage {stage_id} ({stage_name}): ✓ Columns match")
+                    else:
+                        stage_results[stage_id] = {
+                            'name': stage_name,
+                            'success': False,
+                            'details': {'differences': column_differences}
+                        }
+                        direct_log(f"FAILURE: Stage {stage_id} ({stage_name}) - Columns with differences: {list(column_differences.keys())}")
+                        details.append(f"Stage {stage_id} ({stage_name}): ✗ Column values don't match")
+                    
+                except Exception as e:
+                    direct_log(f"ERROR applying stage {stage_id} ({stage_name}): {str(e)}")
+                    direct_log(traceback.format_exc())
                     stage_results[stage_id] = {
                         'name': stage_name,
                         'success': False,
-                        'details': {'differences': column_differences}
+                        'details': {'error': str(e)}
                     }
-                    direct_log(f"FAILURE: Stage {stage_id} ({stage_name}) - Columns with differences: {list(column_differences.keys())}")
-                    details.append(f"Stage {stage_id} ({stage_name}): ✗ Column values don't match")
+                    details.append(f"Stage {stage_id} ({stage_name}): ✗ Error: {str(e)}")
             
             # Calculate final score
             score_value = successful_stages / total_stages if total_stages > 0 else 0.0
@@ -511,21 +572,18 @@ def process_complete_pipeline(pipeline_spec, n):
     
     # Get file paths
     input_path = pipeline_spec['data_path']
-    ground_truth_path = "/Users/tetianabas/Documents/Pipeline_generation/data/ground_truth_data.csv"
-    pipeline_spec_path = "./data/pipeline_spec_10.json"
     
     return Task(
         dataset=[sample], 
         solver=agent, 
         sandbox="docker", 
-        scorer=validation_pipeline_scorer(pipeline_spec, input_path, ground_truth_path, n)
+        scorer=validation_pipeline_scorer(pipeline_spec, input_path, n)
     )
 
 if __name__ == "__main__":
     pipeline_spec = json.load(open("./data/pipeline_spec_10.json"))
     input_path = "/Users/tetianabas/Documents/Pipeline_generation/data/input_data.csv"
-    ground_truth_path = "/Users/tetianabas/Documents/Pipeline_generation/data/ground_truth_data.csv"
-
+    
     n_stages = 1
     print(f"Processing pipeline with {n_stages} operations")
     

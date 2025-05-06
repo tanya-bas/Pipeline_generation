@@ -57,8 +57,8 @@ def default_solver() -> Solver:
     # the below is the solver we will use if no task-specific solver is provided
     return basic_agent(
         tools=[bash(timeout=120), python(timeout=120)],
-        # the submit_description field can be used to provide a hint to the solver about the expected output format
-        submit_description="Finished",
+        # provide a more descriptive submit_description to guide the agent
+        submit_description="When you have completed implementing all pipeline stages and saved the output file, call submit() with the message 'Finished'. Include this exact word so the system knows you've completed the task."
     )
 
 # Validation-based scorer using direct column comparison

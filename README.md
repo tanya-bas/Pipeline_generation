@@ -26,7 +26,7 @@ You can set up the environment using either Poetry or pip:
    poetry shell
    ```
 
-#### Using pip
+#### Using pip (requirements file is used by Docker mainly but can also work for env setup)
 
 1. Clone this repository and navigate to the root directory
 2. Create a virtual environment (optional but recommended):

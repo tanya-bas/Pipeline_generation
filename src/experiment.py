@@ -43,9 +43,9 @@ def run_experiment(start_n=1, end_n=10, iterations=5, model="openai/gpt-4o"):
                     model=model
                 )
                 
-                # Extract accuracy from the result
-                accuracy = eval_result.metrics["accuracy"]["value"]
-                
+                # Extract accuracy from the result 
+                accuracy = eval_result[0].samples[0].scores['validation_pipeline_scorer'].value
+               
                 # Store result
                 results.append({
                     "n": n,

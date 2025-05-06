@@ -581,11 +581,20 @@ def process_complete_pipeline(pipeline_spec, n):
     )
 
 if __name__ == "__main__":
-    pipeline_spec = json.load(open("./data/pipeline_spec_10.json"))
-    input_path = "/Users/tetianabas/Documents/Pipeline_generation/data/input_data.csv"
+    # Use relative paths for portability
+    base_dir = Path(__file__).parent.parent  # Get project root directory
+    data_dir = base_dir / "data"
+    
+    pipeline_spec_path = str(data_dir / "pipeline_spec_10.json")
+    pipeline_spec = json.load(open(pipeline_spec_path))
+    
+    # Get the input path from the pipeline spec for consistency
+    input_path = pipeline_spec['data_path']
     
     n_stages = 1
     print(f"Processing pipeline with {n_stages} operations")
+    print(f"Using specification: {pipeline_spec_path}")
+    print(f"Using input data: {input_path}")
     
     # Run the task with our scorer
     print("Running pipeline evaluation...")

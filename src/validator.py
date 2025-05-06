@@ -3,6 +3,7 @@ import numpy as np
 import json
 import time
 from typing import Dict, List, Tuple, Any, Optional
+from pathlib import Path
 
 
 class PipelineValidator:
@@ -557,10 +558,13 @@ class PipelineValidator:
 
 
 if __name__ == "__main__":
-    spec_path = "/Users/tetianabas/Documents/Pipeline_generation/data/pipeline_spec_10.json"
-    input_path = "/Users/tetianabas/Documents/Pipeline_generation/data/input_data.csv"
-    output_path = "/Users/tetianabas/Documents/Pipeline_generation/data/ground_truth_data.csv"
-
+    # Use relative paths for improved portability
+    base_dir = Path(__file__).parent.parent  # Get project root directory
+    data_dir = base_dir / "data"
+    
+    spec_path = str(data_dir / "pipeline_spec_10.json")
+    input_path = str(data_dir / "input_data.csv")
+    output_path = str(data_dir / "ground_truth_data.csv")
 
     validator = PipelineValidator(spec_path)
     input_df = pd.read_csv(input_path)
@@ -575,5 +579,4 @@ if __name__ == "__main__":
     
     # Save result
     result_df.to_csv(output_path, index=False)
-    breakpoint()
     print(f"Ground truth data saved to {output_path}")
